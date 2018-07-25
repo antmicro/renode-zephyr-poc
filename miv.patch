@@ -1,0 +1,649 @@
+diff --git a/arch/riscv32/core/reset.S b/arch/riscv32/core/reset.S
+index 73a359497..fb78ccec1 100644
+--- a/arch/riscv32/core/reset.S
++++ b/arch/riscv32/core/reset.S
+@@ -1,5 +1,6 @@
+ /*
+  * Copyright (c) 2016 Jean-Paul Etienne <fractalclone@gmail.com>
++ * Contributors: 2018 Antmicro <www.antmicro.com>
+  *
+  * SPDX-License-Identifier: Apache-2.0
+  */
+@@ -7,7 +8,7 @@
+ #include <kernel_structs.h>
+ 
+ /* exports */
+-GTEXT(__start)
++GTEXT(__initialize)
+ GTEXT(__reset)
+ 
+ /* imports */
+@@ -16,11 +17,11 @@ GTEXT(_PrepC)
+ #if CONFIG_INCLUDE_RESET_VECTOR
+ SECTION_FUNC(reset, __reset)
+ 	/*
+-	 * jump to __start
+-	 * use call opcode in case __start is far away.
++	 * jump to __initialize
++	 * use call opcode in case __initialize is far away.
+ 	 * This will be dependent on linker.ld configuration.
+ 	 */
+-	call __start
++	call __initialize
+ #endif /* CONFIG_INCLUDE_RESET_VECTOR */
+ 
+ /* use ABI name of registers for the sake of simplicity */
+@@ -29,7 +30,7 @@ SECTION_FUNC(reset, __reset)
+  * Remainder of asm-land initialization code before we can jump into
+  * the C domain
+  */
+-SECTION_FUNC(TEXT, __start)
++SECTION_FUNC(TEXT, __initialize)
+ #ifdef CONFIG_INIT_STACKS
+ 	/* Pre-populate all bytes in _interrupt_stack with 0xAA */
+ 	la t0, _interrupt_stack
+diff --git a/arch/riscv32/soc/pulpino/vector.S b/arch/riscv32/soc/pulpino/vector.S
+index 309e38ed7..e3d2398ae 100644
+--- a/arch/riscv32/soc/pulpino/vector.S
++++ b/arch/riscv32/soc/pulpino/vector.S
+@@ -1,11 +1,15 @@
+ /*
+  * Copyright (c) 2016 Jean-Paul Etienne <fractalclone@gmail.com>
++ * Contributors: 2018 Antmicro <www.antmicro.com>
+  *
+  * SPDX-License-Identifier: Apache-2.0
+  */
+ 
+ #include <toolchain.h>
+ 
++/* exports */
++GTEXT(__start)
++
+ /* imports */
+ GTEXT(__reset)
+ GTEXT(__irq_wrapper)
+@@ -35,7 +39,7 @@ GTEXT(__irq_wrapper)
+  * ECALL Instruction 0x00000088
+  * Invalid Memory Access 0x0000008C
+  */
+-SECTION_FUNC(vectors, vinit)
++SECTION_FUNC(vectors, __start)
+ 	.option norvc;
+ 
+ 	/* nop addr 0x00000000 - 0x00000058 */
+diff --git a/arch/riscv32/soc/riscv-privilege/common/CMakeLists.txt b/arch/riscv32/soc/riscv-privilege/common/CMakeLists.txt
+index 93bdc2345..d5be1277c 100644
+--- a/arch/riscv32/soc/riscv-privilege/common/CMakeLists.txt
++++ b/arch/riscv32/soc/riscv-privilege/common/CMakeLists.txt
+@@ -1,6 +1,11 @@
+ zephyr_include_directories(.)
+ 
+ zephyr_sources(
++  idle.c
+   soc_irq.S
+   soc_common_irq.c
+   )
++
++if(NOT(CONFIG_SOC_SERIES_RISCV32_QEMU))
++  zephyr_sources(vector.S)
++endif()
+diff --git a/arch/riscv32/soc/riscv-privilege/fe310/CMakeLists.txt b/arch/riscv32/soc/riscv-privilege/fe310/CMakeLists.txt
+index 93df8307f..7f2f3bc14 100644
+--- a/arch/riscv32/soc/riscv-privilege/fe310/CMakeLists.txt
++++ b/arch/riscv32/soc/riscv-privilege/fe310/CMakeLists.txt
+@@ -1,4 +1 @@
+-zephyr_sources(
+-  vector.S
+-  fe310_idle.c
+-  )
++zephyr_sources()
+diff --git a/arch/riscv32/soc/riscv-privilege/fe310/fe310_idle.c b/arch/riscv32/soc/riscv-privilege/fe310/fe310_idle.c
+deleted file mode 100644
+index 59c3d6c8c..000000000
+--- a/arch/riscv32/soc/riscv-privilege/fe310/fe310_idle.c
++++ /dev/null
+@@ -1,60 +0,0 @@
+-/*
+- * Copyright (c) 2017 Jean-Paul Etienne <fractalclone@gmail.com>
+- *
+- * SPDX-License-Identifier: Apache-2.0
+- */
+-
+-#include <toolchain.h>
+-#include <irq.h>
+-#include <soc.h>
+-
+-#include <logging/kernel_event_logger.h>
+-
+-static ALWAYS_INLINE void fe310_idle(unsigned int key)
+-{
+-#ifdef CONFIG_KERNEL_EVENT_LOGGER_SLEEP
+-	_sys_k_event_logger_enter_sleep();
+-#endif
+-	/* unlock interrupts */
+-	irq_unlock(key);
+-
+-	/* Wait for interrupt */
+-	__asm__ volatile("wfi");
+-}
+-
+-/**
+- *
+- * @brief Power save idle routine
+- *
+- * This function will be called by the kernel idle loop or possibly within
+- * an implementation of _sys_power_save_idle in the kernel when the
+- * '_sys_power_save_flag' variable is non-zero.
+- *
+- * @return N/A
+- */
+-void k_cpu_idle(void)
+-{
+-	fe310_idle(SOC_MSTATUS_IEN);
+-}
+-
+-/**
+- *
+- * @brief Atomically re-enable interrupts and enter low power mode
+- *
+- * INTERNAL
+- * The requirements for k_cpu_atomic_idle() are as follows:
+- * 1) The enablement of interrupts and entering a low-power mode needs to be
+- *    atomic, i.e. there should be no period of time where interrupts are
+- *    enabled before the processor enters a low-power mode.  See the comments
+- *    in k_lifo_get(), for example, of the race condition that
+- *    occurs if this requirement is not met.
+- *
+- * 2) After waking up from the low-power mode, the interrupt lockout state
+- *    must be restored as indicated in the 'imask' input parameter.
+- *
+- * @return N/A
+- */
+-void k_cpu_atomic_idle(unsigned int key)
+-{
+-	fe310_idle(key);
+-}
+diff --git a/arch/riscv32/soc/riscv-privilege/fe310/vector.S b/arch/riscv32/soc/riscv-privilege/fe310/vector.S
+deleted file mode 100644
+index 6d3b04e3a..000000000
+--- a/arch/riscv32/soc/riscv-privilege/fe310/vector.S
++++ /dev/null
+@@ -1,24 +0,0 @@
+-/*
+- * Copyright (c) 2017 Jean-Paul Etienne <fractalclone@gmail.com>
+- *
+- * SPDX-License-Identifier: Apache-2.0
+- */
+-
+-#include <toolchain.h>
+-
+-/* imports */
+-GTEXT(__start)
+-GTEXT(__irq_wrapper)
+-
+-SECTION_FUNC(vectors, vinit)
+-	.option norvc;
+-
+-	/*
+-	 * Set mtvec (Machine Trap-Vector Base-Address Register)
+-	 * to __irq_wrapper.
+-	 */
+-	la t0, __irq_wrapper
+-	csrw mtvec, t0
+-
+-	/* Jump to __start */
+-	tail __start
+diff --git a/arch/riscv32/soc/riscv-privilege/riscv32-qemu/vector.S b/arch/riscv32/soc/riscv-privilege/riscv32-qemu/vector.S
+index a99eff021..c7ade64b4 100644
+--- a/arch/riscv32/soc/riscv-privilege/riscv32-qemu/vector.S
++++ b/arch/riscv32/soc/riscv-privilege/riscv32-qemu/vector.S
+@@ -1,11 +1,15 @@
+ /*
+  * Copyright (c) 2016 Jean-Paul Etienne <fractalclone@gmail.com>
++ * Contributors: 2018 Antmicro <www.antmicro.com>
+  *
+  * SPDX-License-Identifier: Apache-2.0
+  */
+ 
+ #include <toolchain.h>
+ 
++/* exports */
++GTEXT(__start)
++
+ /* imports */
+ GTEXT(__reset)
+ GTEXT(__irq_wrapper)
+@@ -19,7 +23,7 @@ GTEXT(__irq_wrapper)
+  *
+  * Call __irq_wrapper to handle all interrupts/exceptions/faults
+  */
+-SECTION_FUNC(vectors, vinit)
++SECTION_FUNC(vectors, __start)
+ 	.option norvc;
+ 
+ 	/*
+diff --git a/boards/riscv32/hifive1/hifive1_defconfig b/boards/riscv32/hifive1/hifive1_defconfig
+index b5f2c56a1..eafcee72b 100644
+--- a/boards/riscv32/hifive1/hifive1_defconfig
++++ b/boards/riscv32/hifive1/hifive1_defconfig
+@@ -11,7 +11,7 @@ CONFIG_UART_FE310_PORT_0_BAUD_RATE=115200
+ CONFIG_UART_FE310_PORT_0_NAME="uart0"
+ CONFIG_UART_CONSOLE=y
+ CONFIG_UART_CONSOLE_ON_DEV_NAME="uart0"
+-CONFIG_PLIC_FE310=y
++CONFIG_PLIC=y
+ CONFIG_PINMUX=y
+ CONFIG_PINMUX_FE310=y
+ CONFIG_RISCV_MACHINE_TIMER=y
+diff --git a/drivers/interrupt_controller/CMakeLists.txt b/drivers/interrupt_controller/CMakeLists.txt
+index 4c0a39301..19d27067b 100644
+--- a/drivers/interrupt_controller/CMakeLists.txt
++++ b/drivers/interrupt_controller/CMakeLists.txt
+@@ -4,7 +4,7 @@ zephyr_sources_ifdef(CONFIG_LOAPIC                  loapic_intr.c system_apic.c)
+ zephyr_sources_ifdef(CONFIG_LOAPIC_SPURIOUS_VECTOR  loapic_spurious.c)
+ zephyr_sources_ifdef(CONFIG_MVIC                    mvic.c)
+ zephyr_sources_ifdef(CONFIG_PIC_DISABLE             i8259.c)
+-zephyr_sources_ifdef(CONFIG_PLIC_FE310              plic_fe310.c)
++zephyr_sources_ifdef(CONFIG_PLIC                    plic.c)
+ zephyr_sources_ifdef(CONFIG_SHARED_IRQ              shared_irq.c)
+ zephyr_sources_ifdef(CONFIG_SOC_FAMILY_STM32        exti_stm32.c)
+ zephyr_sources_ifdef(CONFIG_CAVS_ICTL               cavs_ictl.c)
+diff --git a/drivers/interrupt_controller/Kconfig b/drivers/interrupt_controller/Kconfig
+index 181a800ff..8a8c3d705 100644
+--- a/drivers/interrupt_controller/Kconfig
++++ b/drivers/interrupt_controller/Kconfig
+@@ -116,14 +116,14 @@ config ARCV2_INTERRUPT_UNIT
+ 	  building a processor, you can configure the processor to include an
+ 	  interrupt unit. The ARCv2 interrupt unit is highly programmable.
+ 
+-config PLIC_FE310
+-	bool "SiFive Freedom E310 Platform Level Interrupt Controller (PLIC)"
++config PLIC
++	bool "Platform Level Interrupt Controller (PLIC)"
+ 	default y
+-	depends on SOC_RISCV32_FE310
++	depends on SOC_FAMILY_RISCV_PRIVILEGE && !QEMU_TARGET
+ 	select RISCV_HAS_PLIC
+ 	help
+-	  SiFive Freedom E310 Platform Level Interrupt Controller provides support
+-	  for external interrupt lines defined by the FE310 SOC;
++	  Platform Level Interrupt Controller provides support
++	  for external interrupt lines defined by the RISC-V SoC;
+ 
+ config DW_ICTL
+ 	bool "Designware Interrupt Controller"
+diff --git a/drivers/interrupt_controller/plic_fe310.c b/drivers/interrupt_controller/plic_fe310.c
+deleted file mode 100644
+index cf359c016..000000000
+--- a/drivers/interrupt_controller/plic_fe310.c
++++ /dev/null
+@@ -1,225 +0,0 @@
+-/*
+- * Copyright (c) 2017 Jean-Paul Etienne <fractalclone@gmail.com>
+- *
+- * SPDX-License-Identifier: Apache-2.0
+- */
+-
+-/**
+- * @brief Platform Level Interrupt Controller (PLIC) driver
+- *        for the SiFive Freedom E310 processor
+- */
+-
+-#include <kernel.h>
+-#include <arch/cpu.h>
+-#include <init.h>
+-#include <soc.h>
+-#include <sw_isr_table.h>
+-
+-#define PLIC_FE310_IRQS        (CONFIG_NUM_IRQS - RISCV_MAX_GENERIC_IRQ)
+-#define PLIC_FE310_EN_SIZE     ((PLIC_FE310_IRQS >> 5) + 1)
+-
+-struct plic_fe310_regs_t {
+-	u32_t threshold_prio;
+-	u32_t claim_complete;
+-};
+-
+-static int save_irq;
+-
+-/**
+- *
+- * @brief Enable a riscv PLIC-specific interrupt line
+- *
+- * This routine enables a RISCV PLIC-specific interrupt line.
+- * riscv_plic_irq_enable is called by SOC_FAMILY_RISCV_PRIVILEGE
+- * _arch_irq_enable function to enable external interrupts for
+- * IRQS > RISCV_MAX_GENERIC_IRQ, whenever CONFIG_RISCV_HAS_PLIC
+- * variable is set.
+- * @param irq IRQ number to enable
+- *
+- * @return N/A
+- */
+-void riscv_plic_irq_enable(u32_t irq)
+-{
+-	u32_t key;
+-	u32_t fe310_irq = irq - RISCV_MAX_GENERIC_IRQ;
+-	volatile u32_t *en =
+-		(volatile u32_t *)FE310_PLIC_IRQ_EN_BASE_ADDR;
+-
+-	key = irq_lock();
+-	en += (fe310_irq >> 5);
+-	*en |= (1 << (fe310_irq & 31));
+-	irq_unlock(key);
+-}
+-
+-/**
+- *
+- * @brief Disable a riscv PLIC-specific interrupt line
+- *
+- * This routine disables a RISCV PLIC-specific interrupt line.
+- * riscv_plic_irq_disable is called by SOC_FAMILY_RISCV_PRIVILEGE
+- * _arch_irq_disable function to disable external interrupts, for
+- * IRQS > RISCV_MAX_GENERIC_IRQ, whenever CONFIG_RISCV_HAS_PLIC
+- * variable is set.
+- * @param irq IRQ number to disable
+- *
+- * @return N/A
+- */
+-void riscv_plic_irq_disable(u32_t irq)
+-{
+-	u32_t key;
+-	u32_t fe310_irq = irq - RISCV_MAX_GENERIC_IRQ;
+-	volatile u32_t *en =
+-		(volatile u32_t *)FE310_PLIC_IRQ_EN_BASE_ADDR;
+-
+-	key = irq_lock();
+-	en += (fe310_irq >> 5);
+-	*en &= ~(1 << (fe310_irq & 31));
+-	irq_unlock(key);
+-}
+-
+-/**
+- *
+- * @brief Check if a riscv PLIC-specific interrupt line is enabled
+- *
+- * This routine checks if a RISCV PLIC-specific interrupt line is enabled.
+- * @param irq IRQ number to check
+- *
+- * @return 1 or 0
+- */
+-int riscv_plic_irq_is_enabled(u32_t irq)
+-{
+-	volatile u32_t *en =
+-		(volatile u32_t *)FE310_PLIC_IRQ_EN_BASE_ADDR;
+-	u32_t fe310_irq = irq - RISCV_MAX_GENERIC_IRQ;
+-
+-	en += (fe310_irq >> 5);
+-	return !!(*en & (1 << (fe310_irq & 31)));
+-}
+-
+-/**
+- *
+- * @brief Set priority of a riscv PLIC-specific interrupt line
+- *
+- * This routine set the priority of a RISCV PLIC-specific interrupt line.
+- * riscv_plic_irq_set_prio is called by riscv32 _ARCH_IRQ_CONNECT to set
+- * the priority of an interrupt whenever CONFIG_RISCV_HAS_PLIC variable is set.
+- * @param irq IRQ number for which to set priority
+- *
+- * @return N/A
+- */
+-void riscv_plic_set_priority(u32_t irq, u32_t priority)
+-{
+-	volatile u32_t *prio =
+-		(volatile u32_t *)FE310_PLIC_PRIO_BASE_ADDR;
+-
+-	/* Can set priority only for PLIC-specific interrupt line */
+-	if (irq <= RISCV_MAX_GENERIC_IRQ)
+-		return;
+-
+-	if (priority > FE310_PLIC_MAX_PRIORITY)
+-		priority = FE310_PLIC_MAX_PRIORITY;
+-
+-	prio += (irq - RISCV_MAX_GENERIC_IRQ);
+-	*prio = priority;
+-}
+-
+-/**
+- *
+- * @brief Get riscv PLIC-specific interrupt line causing an interrupt
+- *
+- * This routine returns the RISCV PLIC-specific interrupt line causing an
+- * interrupt.
+- * @param irq IRQ number for which to set priority
+- *
+- * @return N/A
+- */
+-int riscv_plic_get_irq(void)
+-{
+-	return save_irq;
+-}
+-
+-static void plic_fe310_irq_handler(void *arg)
+-{
+-	volatile struct plic_fe310_regs_t *regs =
+-		(volatile struct plic_fe310_regs_t *)FE310_PLIC_REG_BASE_ADDR;
+-
+-	u32_t irq;
+-	struct _isr_table_entry *ite;
+-
+-	/* Get the IRQ number generating the interrupt */
+-	irq = regs->claim_complete;
+-
+-	/*
+-	 * Save IRQ in save_irq. To be used, if need be, by
+-	 * subsequent handlers registered in the _sw_isr_table table,
+-	 * as IRQ number held by the claim_complete register is
+-	 * cleared upon read.
+-	 */
+-	save_irq = irq;
+-
+-	/*
+-	 * If the IRQ is out of range, call _irq_spurious.
+-	 * A call to _irq_spurious will not return.
+-	 */
+-	if (irq == 0 || irq >= PLIC_FE310_IRQS)
+-		_irq_spurious(NULL);
+-
+-	irq += RISCV_MAX_GENERIC_IRQ;
+-
+-	/* Call the corresponding IRQ handler in _sw_isr_table */
+-	ite = (struct _isr_table_entry *)&_sw_isr_table[irq];
+-	ite->isr(ite->arg);
+-
+-	/*
+-	 * Write to claim_complete register to indicate to
+-	 * PLIC controller that the IRQ has been handled.
+-	 */
+-	regs->claim_complete = save_irq;
+-}
+-
+-/**
+- *
+- * @brief Initialize the SiFive FE310 Platform Level Interrupt Controller
+- * @return N/A
+- */
+-static int plic_fe310_init(struct device *dev)
+-{
+-	ARG_UNUSED(dev);
+-
+-	volatile u32_t *en =
+-		(volatile u32_t *)FE310_PLIC_IRQ_EN_BASE_ADDR;
+-	volatile u32_t *prio =
+-		(volatile u32_t *)FE310_PLIC_PRIO_BASE_ADDR;
+-	volatile struct plic_fe310_regs_t *regs =
+-		(volatile struct plic_fe310_regs_t *)FE310_PLIC_REG_BASE_ADDR;
+-	int i;
+-
+-	/* Ensure that all interrupts are disabled initially */
+-	for (i = 0; i < PLIC_FE310_EN_SIZE; i++) {
+-		*en = 0;
+-		en++;
+-	}
+-
+-	/* Set priority of each interrupt line to 0 initially */
+-	for (i = 0; i < PLIC_FE310_IRQS; i++) {
+-		*prio = 0;
+-		prio++;
+-	}
+-
+-	/* Set threshold priority to 0 */
+-	regs->threshold_prio = 0;
+-
+-	/* Setup IRQ handler for PLIC driver */
+-	IRQ_CONNECT(RISCV_MACHINE_EXT_IRQ,
+-		    0,
+-		    plic_fe310_irq_handler,
+-		    NULL,
+-		    0);
+-
+-	/* Enable IRQ for PLIC driver */
+-	irq_enable(RISCV_MACHINE_EXT_IRQ);
+-
+-	return 0;
+-}
+-
+-SYS_INIT(plic_fe310_init, PRE_KERNEL_1, CONFIG_KERNEL_INIT_PRIORITY_DEFAULT);
+diff --git a/drivers/serial/CMakeLists.txt b/drivers/serial/CMakeLists.txt
+index 0bc9b2a41..45b3f0661 100644
+--- a/drivers/serial/CMakeLists.txt
++++ b/drivers/serial/CMakeLists.txt
+@@ -22,5 +22,6 @@ zephyr_library_sources_if_kconfig(uart_stellaris.c)
+ zephyr_library_sources_if_kconfig(uart_stm32.c)
+ zephyr_library_sources_if_kconfig(uart_sam0.c)
+ zephyr_library_sources_if_kconfig(usart_mcux_lpc.c)
++zephyr_library_sources_if_kconfig(uart_miv.c)
+ 
+ zephyr_library_sources_ifdef(CONFIG_USERSPACE   uart_handlers.c)
+diff --git a/drivers/serial/Kconfig b/drivers/serial/Kconfig
+index 7c4ffe739..20ebfe619 100644
+--- a/drivers/serial/Kconfig
++++ b/drivers/serial/Kconfig
+@@ -73,6 +73,8 @@ source "drivers/serial/Kconfig.mcux_lpsci"
+ 
+ source "drivers/serial/Kconfig.mcux_lpuart"
+ 
++source "drivers/serial/Kconfig.miv"
++
+ source "drivers/serial/Kconfig.imx"
+ 
+ source "drivers/serial/Kconfig.stellaris"
+diff --git a/include/arch/riscv32/arch.h b/include/arch/riscv32/arch.h
+index dddae5c97..56860bf13 100644
+--- a/include/arch/riscv32/arch.h
++++ b/include/arch/riscv32/arch.h
+@@ -1,5 +1,6 @@
+ /*
+  * Copyright (c) 2016 Jean-Paul Etienne <fractalclone@gmail.com>
++ * Contributors: 2018 Antmicro <www.antmicro.com>
+  *
+  * SPDX-License-Identifier: Apache-2.0
+  */
+@@ -127,8 +128,8 @@ extern u32_t _timer_cycle_get_32(void);
+ #include <arch/riscv32/pulpino/asm_inline.h>
+ #elif defined(CONFIG_SOC_RISCV32_QEMU)
+ #include <arch/riscv32/riscv32-qemu/asm_inline.h>
+-#elif defined(CONFIG_SOC_RISCV32_FE310)
+-#include <arch/riscv32/fe310/asm_inline.h>
++#elif defined(CONFIG_SOC_FAMILY_RISCV_PRIVILEGE)
++#include <arch/riscv32/riscv-privilege/asm_inline.h>
+ #endif
+ 
+ #ifdef __cplusplus
+diff --git a/include/arch/riscv32/fe310/asm_inline.h b/include/arch/riscv32/fe310/asm_inline.h
+deleted file mode 100644
+index c8b3068e2..000000000
+--- a/include/arch/riscv32/fe310/asm_inline.h
++++ /dev/null
+@@ -1,21 +0,0 @@
+-/*
+- * Copyright (c) 2017 Jean-Paul Etienne <fractalclone@gmail.com>
+- *
+- * SPDX-License-Identifier: Apache-2.0
+- */
+-
+-#ifndef _ASM_INLINE_PUBLIC_H
+-#define _ASM_INLINE_PUBLIC_H
+-
+-/*
+- * The file must not be included directly
+- * Include arch/cpu.h instead
+- */
+-
+-#if defined(__GNUC__)
+-#include <arch/riscv32/fe310/asm_inline_gcc.h>
+-#else
+-#error "Supports only GNU C compiler"
+-#endif
+-
+-#endif /* _ASM_INLINE_PUBLIC_H */
+diff --git a/include/arch/riscv32/fe310/asm_inline_gcc.h b/include/arch/riscv32/fe310/asm_inline_gcc.h
+deleted file mode 100644
+index a20cfc020..000000000
+--- a/include/arch/riscv32/fe310/asm_inline_gcc.h
++++ /dev/null
+@@ -1,65 +0,0 @@
+-/*
+- * Copyright (c) 2017 Jean-Paul Etienne <fractalclone@gmail.com>
+- *
+- * SPDX-License-Identifier: Apache-2.0
+- */
+-
+-#ifndef _ASM_INLINE_GCC_H
+-#define _ASM_INLINE_GCC_H
+-
+-#ifdef __cplusplus
+-extern "C" {
+-#endif
+-
+-/*
+- * The file must not be included directly
+- * Include arch/cpu.h instead
+- * TEMPORARY
+- */
+-
+-#ifndef _ASMLANGUAGE
+-
+-#include <toolchain.h>
+-
+-/**
+- *
+- * @brief find least significant bit set in a 32-bit word
+- *
+- * This routine finds the first bit set starting from the least significant bit
+- * in the argument passed in and returns the index of that bit.  Bits are
+- * numbered starting at 1 from the least significant bit.  A return value of
+- * zero indicates that the value passed is zero.
+- *
+- * @return least significant bit set, 0 if @a op is 0
+- */
+-static ALWAYS_INLINE unsigned int find_lsb_set(u32_t op)
+-{
+-	return __builtin_ffs(op);
+-}
+-
+-/**
+- *
+- * @brief find most significant bit set in a 32-bit word
+- *
+- * This routine finds the first bit set starting from the most significant bit
+- * in the argument passed in and returns the index of that bit.  Bits are
+- * numbered starting at 1 from the least significant bit.  A return value of
+- * zero indicates that the value passed is zero.
+- *
+- * @return most significant bit set, 0 if @a op is 0
+- */
+-static ALWAYS_INLINE unsigned int find_msb_set(u32_t op)
+-{
+-	if (!op)
+-		return 0;
+-
+-	return 32 - __builtin_clz(op);
+-}
+-
+-#endif /* _ASMLANGUAGE */
+-
+-#ifdef __cplusplus
+-}
+-#endif
+-
+-#endif /* _ASM_INLINE_GCC_PUBLIC_GCC_H */
